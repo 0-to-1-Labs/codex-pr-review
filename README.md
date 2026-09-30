@@ -27,6 +27,19 @@ Findings are filtered by a configurable confidence threshold (default 0.8) so yo
 
 ## Installation
 
+### Plugin marketplace (recommended)
+
+In Claude Code:
+
+```
+/plugin marketplace add 0-to-1-Labs/claude-marketplace
+/plugin install codex-pr-review@0-to-1-labs
+```
+
+Then restart Claude Code. `/plugin update codex-pr-review@0-to-1-labs` handles upgrades.
+
+### Alternative: standalone install (no marketplace)
+
 ```bash
 git clone https://github.com/johnpsasser/codex-pr-review.git
 cd codex-pr-review
