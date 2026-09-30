@@ -106,10 +106,10 @@ If no config is detectable, the floor no-ops (with a note on stderr).
 When this skill is invoked, run the review script:
 
 ```bash
-bash $CLAUDE_PLUGIN_ROOT/scripts/review.sh [ARGS]
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/review.sh" [ARGS]
 ```
 
-If `$CLAUDE_PLUGIN_ROOT` is not set, use the absolute path:
+If the path above is not resolved (standalone skill install), use the absolute path:
 
 ```bash
 bash ~/.claude/skills/codex-pr-review/scripts/review.sh [ARGS]
