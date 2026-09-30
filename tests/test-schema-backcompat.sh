@@ -64,10 +64,11 @@ JSON
   echo 'set -uo pipefail'
   printf 'SCRIPT_DIR=%q\n' "$SCRIPTS_DIR"
   printf 'WORK_DIR=%q\n' "$fmt_work"
-  echo 'MODEL="gpt-5.3-codex"'
-  echo 'MODEL_CODEX="gpt-5.3-codex"'
-  echo 'MODEL_CLAUDE="claude-opus-4-7"'
+  echo 'MODEL="gpt-6.1-sol"'
+  echo 'MODEL_CODEX="gpt-6.1-sol"'
+  echo 'MODEL_CLAUDE="opus"'
   echo 'THRESHOLD="0.8"'
+  extract_fn "escape_md_field"
   extract_fn "format_comment"
 } > "$fmt_helpers"
 # shellcheck disable=SC1090

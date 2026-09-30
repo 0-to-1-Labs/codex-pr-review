@@ -13,9 +13,10 @@
 #      and exercise the merge-only path).
 #   4. finding_id() is deterministic across runs given identical inputs.
 #
-# RECORD=1 mode: actually invokes Claude Haiku against the hallucinated-
-# finding fixture and asserts the verdict is `refuted`. Skipped silently
-# when `claude` is missing or unauthenticated, so CI does not break.
+# RECORD=1 mode: actually invokes Claude (haiku alias, sandboxed via
+# run_claude_p) against the hallucinated-finding fixture and asserts the
+# verdict is `refuted`. Skipped silently when `claude` is missing or
+# unauthenticated, so CI does not break.
 #
 # Usage:  bash tests/test-verifier.sh
 #         RECORD=1 bash tests/test-verifier.sh
@@ -100,6 +101,9 @@ helpers="$WORK/helpers.sh"
   extract_fn "_build_verifier_prompt"
   extract_fn "finding_id"
   extract_fn "_extract_diff_hunk"
+  extract_fn "run_claude_p"
+  extract_fn "unwrap_claude_envelope"
+  extract_fn "_run_claude_verifier"
 } > "$helpers"
 # shellcheck disable=SC1090
 source "$helpers"
@@ -255,9 +259,29 @@ assert "[[ \"$v1\" == 'inconclusive' ]]" "inconclusive finding survives with ver
 assert "[[ \"$a1\" == 'unconfirmed-by-codex' ]]" "claude-source inconclusive maps to unconfirmed-by-codex"
 assert "[[ \"$p1\" -eq 1 ]]" "inconclusive finding priority is demoted (2 → 1; was $p1)"
 
+# ─── Test 4b: verifier files are keyed by finding id AND source family ──────
+# A [both] pair (same file|line|title from Codex and Claude) shares finding_id;
+# the two verifier subshells run in parallel and must not share prompt/verdict
+# files. Regression sentinel on the naming pattern in review.sh.
+echo "Test 4b: verifier verdict files include the source family"
+assert "grep -Fq 'finding-\${fkey}-verdict.json' \"$SCRIPTS_DIR/review.sh\"" \
+  "dispatch writes finding-<id>-<source>-verdict.json"
+assert "grep -Fq 'finding-\${fid}-\${source}-verdict.json' \"$SCRIPTS_DIR/review.sh\"" \
+  "merge reads finding-<id>-<source>-verdict.json"
+assert "grep -Fq 'fkey=\"\${fid}-\${source}\"' \"$SCRIPTS_DIR/review.sh\"" \
+  "file key is fid-source"
+# The sandbox flags on every claude -p call (CPR-01 / CPR-03).
+echo "Test 4c: claude -p is invoked in restricted mode with Read,Grep only"
+claude_block=$(awk '/^run_claude_p\(\) \{/,/^}/' "$SCRIPTS_DIR/review.sh")
+for flag in '--restricted' '--tools Read,Grep' '--disallowedTools "mcp__\*"' '--strict-mcp-config' '--disable-slash-commands' '--permission-prompts none' '--no-session-persistence' '--max-budget-usd'; do
+  assert "printf '%s' \"\$claude_block\" | grep -q -- '$flag'" "run_claude_p passes $flag"
+done
+assert "! grep -v '^[[:space:]]*#' \"$SCRIPTS_DIR/review.sh\" | grep -q -- '--allowedTools'" "no --allowedTools left in code (it only pre-approves)"
+assert "[[ \$(grep -c '^[[:space:]]*claude \\\\$' \"$SCRIPTS_DIR/review.sh\") -eq 1 ]]" "exactly one claude invocation site (run_claude_p)"
+
 # ─── Test 5 (RECORD=1 only): live Haiku verifier on hallucinated finding ────
 if [[ "${RECORD:-0}" == "1" ]]; then
-  echo "Test 5 (RECORD=1): live Haiku verifier vs hallucinated finding"
+  echo "Test 5 (RECORD=1): live haiku verifier vs hallucinated finding"
   if ! command -v claude &>/dev/null; then
     echo "  skipped: claude CLI not on PATH"
   elif ! claude auth status >/dev/null 2>&1; then
@@ -277,27 +301,18 @@ if [[ "${RECORD:-0}" == "1" ]]; then
       "$WORK/live-file.txt" \
       "$WORK/live-hunk.diff"
 
-    schema_str=$(cat "$SCRIPTS_DIR/verifier-output-schema.json")
-    if claude \
-        --model "claude-haiku-4-5" \
-        --json-schema "$schema_str" \
-        --output-format json \
-        --allowedTools Read,Grep \
-        --print \
-        - < "$live_prompt" > "$live_out" 2>"$live_stderr"; then
-      # Unwrap CLI envelope if present.
-      if jq -e 'has("result")' "$live_out" >/dev/null 2>&1; then
-        jq -r '.result' "$live_out" > "$live_out.unwrapped"
-        mv "$live_out.unwrapped" "$live_out"
-      fi
+    # Same sandboxed path review.sh uses (run_claude_p → unwrap), on the
+    # cheap `haiku` alias, cwd = this repo.
+    REVIEW_ROOT="$REPO_ROOT" MAX_BUDGET_USD="0.50"
+    if _run_claude_verifier "$live_prompt" "$live_out" "$live_stderr" "haiku"; then
       verdict=$(jq -r '.verdict // ""' "$live_out" 2>/dev/null || echo "")
       assert "[[ \"$verdict\" == 'refuted' ]]" \
-        "live Haiku refutes the hallucinated finding (got: $verdict)"
+        "live haiku verifier refutes the hallucinated finding (got: $verdict)"
     else
       echo "  WARN: live verifier subprocess failed; see $live_stderr" >&2
       cat "$live_stderr" >&2 || true
       fail=$((fail + 1))
-      fail_messages+=("live Haiku verifier subprocess exited non-zero")
+      fail_messages+=("live haiku verifier subprocess exited non-zero")
     fi
   fi
 fi

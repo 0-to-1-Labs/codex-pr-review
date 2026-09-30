@@ -46,6 +46,11 @@
             "enum": ["new", "persisting"],
             "description": "Whether this is a new finding or one persisting from a prior review. Use 'new' for initial reviews."
           },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "performance", "maintainability", "style"],
+            "description": "Review criterion the finding falls under. The location validator keeps 'maintainability' findings that cite unchanged-but-related lines in a touched file; every other category must cite a line inside a diff hunk."
+          },
           "source": {
             "type": "string",
             "enum": ["codex", "claude", "deterministic"],
@@ -74,7 +79,7 @@
             "description": "v2 diagnostic: 1-2 sentence justification the cross-family verifier returned alongside its verdict. Useful for understanding why findings get marked inconclusive vs confirmed. Chunk reviewers MUST emit null; review.sh populates it from the verifier output."
           }
         },
-        "required": ["title", "body", "confidence_score", "priority", "code_location", "status", "suggested_fix", "source", "verifier_verdict", "agreement", "original_confidence_score", "verifier_evidence"],
+        "required": ["title", "body", "confidence_score", "priority", "code_location", "status", "category", "suggested_fix", "source", "verifier_verdict", "agreement", "original_confidence_score", "verifier_evidence"],
         "additionalProperties": false
       }
     },
@@ -113,7 +118,7 @@
         "mode": {
           "type": "string",
           "enum": ["initial", "followup-after-fixes", "delta-since-prior"],
-          "description": "Iteration classification. See SPEC_V2.md §4.1."
+          "description": "Iteration classification (initial / followup-after-fixes / delta-since-prior)."
         },
         "prior_sha": {
           "type": "string",

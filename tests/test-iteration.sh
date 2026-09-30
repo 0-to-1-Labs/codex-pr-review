@@ -113,6 +113,27 @@ v1_iter=$(jq -r '.iteration' "$v1_json")
 assert "[[ -z \"$v1_sha\" ]]" "v1 fixture: prior_sha is empty (got: '$v1_sha')"
 assert "[[ \"$v1_iter\" == '1' ]]" "v1 fixture: iteration=1 (got: $v1_iter)"
 
+# ─── Test 2b: sentinel values are validated (CPR-02) ─────────────────────────
+# `sha` reaches `git log`/`git diff` as a revision; a git option smuggled in
+# must degrade to "no sha". Non-integer counters degrade to defaults.
+echo "Test 2b: _parse_v2_sentinel rejects non-hex sha and non-integer counters"
+bad_line='<!-- codex-pr-review:meta v=2 sha=--output=/tmp/pwned iteration=41x findings=abc verdict=correct mode=initial prior_sha=../../x -->'
+bad_json=$(_parse_v2_sentinel "$bad_line")
+assert "printf '%s' \"\$bad_json\" | jq -e '.sha == \"\"' >/dev/null" "sha=--output=... is dropped (got: $(printf '%s' "$bad_json" | jq -r .sha))"
+assert "printf '%s' \"\$bad_json\" | jq -e '.prior_sha_inner == \"\"' >/dev/null" "prior_sha=../../x is dropped"
+assert "printf '%s' \"\$bad_json\" | jq -e '.iteration == 1' >/dev/null" "iteration=41x falls back to 1"
+assert "printf '%s' \"\$bad_json\" | jq -e '.findings_count == 0' >/dev/null" "findings=abc falls back to 0"
+good_line='<!-- codex-pr-review:meta v=2 sha=abc123def456 iteration=3 findings=2 verdict=needs-changes mode=delta-since-prior prior_sha=deadbeef -->'
+good_json=$(_parse_v2_sentinel "$good_line")
+assert "printf '%s' \"\$good_json\" | jq -e '.sha == \"abc123def456\" and .iteration == 3 and .findings_count == 2 and .prior_sha_inner == \"deadbeef\" and .verdict == \"needs-changes\"' >/dev/null" \
+  "well-formed sentinel parses unchanged"
+# compute_delta_diff refuses a non-hex sha before touching git.
+bad_delta="$WORK/bad-delta.txt"
+rc=0
+compute_delta_diff "--output=$WORK/pwned" "$bad_delta" 2>/dev/null || rc=$?
+assert "[[ \"$rc\" -ne 0 ]]" "compute_delta_diff rejects a git-option sha (rc=$rc)"
+assert "[[ ! -e \"$WORK/pwned..HEAD\" ]]" "no file written via --output"
+
 # ─── Test 3: no sentinel ─────────────────────────────────────────────────────
 echo "Test 3: gather_prior_review_v2 on comment with no sentinels"
 plain_fixture="$WORK/plain-comment.md"
@@ -257,10 +278,11 @@ JSON
   echo 'set -uo pipefail'
   printf 'SCRIPT_DIR=%q\n' "$SCRIPTS_DIR"
   printf 'WORK_DIR=%q\n' "$fmt_work"
-  echo 'MODEL="gpt-5.3-codex"'
-  echo 'MODEL_CODEX="gpt-5.3-codex"'
-  echo 'MODEL_CLAUDE="claude-opus-4-7"'
+  echo 'MODEL="gpt-6.1-sol"'
+  echo 'MODEL_CODEX="gpt-6.1-sol"'
+  echo 'MODEL_CLAUDE="opus"'
   echo 'THRESHOLD="0.8"'
+  extract_fn "escape_md_field"
   extract_fn "format_comment"
 } > "$fmt_helpers"
 # shellcheck disable=SC1090
