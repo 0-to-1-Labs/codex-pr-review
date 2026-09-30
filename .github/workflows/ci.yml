@@ -13,12 +13,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Node 18 is the minimum the AST chunker (scripts/plan.js + tree-sitter)
-      # supports per scripts/package.json "engines".
-      - name: Set up Node 18
+      # Node 22 is the current LTS; scripts/package.json "engines" sets the
+      # floor at 20 (Node 18 is end-of-life).
+      - name: Set up Node 22
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: "22"
 
       # jq is preinstalled on ubuntu-latest runners; install as a guard so the
       # suite (which leans heavily on jq) never fails for a missing binary.
@@ -30,17 +30,33 @@ jobs:
           fi
           jq --version
 
-      # Install the Node helper deps (tree-sitter grammars) only if a manifest
-      # exists. The test suite is hermetic without these — the chunker tests
-      # that need tree-sitter use the AWK fallback path — but installing keeps
-      # plan.js's AST mode exercisable.
+      # Reproducible install of the tree-sitter grammars from the committed
+      # lockfile. The test suite is hermetic without these — the chunker tests
+      # that need tree-sitter use the AWK fallback path — but the AST smoke
+      # step below requires them.
       - name: Install scripts/ npm deps
         run: |
-          if [ -f scripts/package.json ]; then
-            cd scripts
-            npm install --no-audit --no-fund
-          else
-            echo "no scripts/package.json; skipping npm install"
+          cd scripts
+          npm ci --no-audit --no-fund --omit=dev
+
+      # Prove the native bindings load and the AST chunker actually engages
+      # (auto mode silently falls back to hunk mode when they do not).
+      - name: AST chunker smoke test
+        run: |
+          out=$(mktemp -d)
+          node scripts/plan.js --diff tests/fixtures/small-py.diff --chunker ast \
+            --chunk-size 3000 --output "$out/plan.json" --chunks-dir "$out/chunks" \
+            --awk scripts/chunk-diff.awk
+          mode=$(jq -r .chunker_mode "$out/plan.json")
+          echo "chunker_mode=$mode"
+          test "$mode" = "ast"
+
+      - name: Shell syntax and lint
+        run: |
+          for f in install.sh scripts/*.sh tests/*.sh; do bash -n "$f"; done
+          node --check scripts/plan.js
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning install.sh scripts/*.sh
           fi
 
       # The suite is hermetic by default: the only network path is

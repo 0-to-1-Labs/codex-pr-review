@@ -1,21 +1,33 @@
 #!/usr/bin/env bash
 # scripts/det-floor.sh — V2 P3 deterministic floor (lint + typecheck + tests on
-# changed lines). See SPEC_V2.md §4.2 and IMPLEMENTATION_PLAN.md §2 P3.
+# changed lines). Findings are grounded in tool output, not model inference,
+# and skip the cross-family verifier.
 #
 # Inputs (positional):
 #   $1  WORK_DIR     — work directory; we write det-findings.json + det-stderr.log here
-#   $2  REPO_ROOT    — repo root (cwd for tool invocations)
+#   $2  REPO_ROOT    — tree the tools run against (cwd for tool invocations;
+#                     review.sh passes the PR-head worktree)
 #   $3  DIFF_PATH    — path to full diff file (used to derive changed-line ranges
 #                     when $WORK_DIR/plan.json is unavailable or lacks ranges)
 #   $4  TOML_PATH    — optional path to .codex-pr-review.toml. If omitted, we
-#                     try $REPO_ROOT/.codex-pr-review.toml.
+#                     try $DET_TRUSTED_ROOT/.codex-pr-review.toml, then
+#                     $REPO_ROOT/.codex-pr-review.toml.
 #
 # Output:
 #   $WORK_DIR/det-findings.json   — JSON array (matches det-output-schema.json)
 #   $WORK_DIR/det-stderr.log      — concatenated tool stderr captures
 #
 # Env:
-#   NO_DETERMINISTIC=1            — short-circuit: write [] and exit 0
+#   NO_DETERMINISTIC=1|true       — short-circuit: write [] and exit 0
+#   DET_TRUSTED_ROOT=<dir>        — where .codex-pr-review.toml is read from
+#                                   (review.sh passes the LOCAL checkout so the
+#                                   PR cannot supply the `tests` command, which
+#                                   runs an arbitrary executable). When set,
+#                                   the TOML is never read from REPO_ROOT.
+#   DET_AUTODETECT=1              — also run ruff/eslint/golangci-lint/tsc when
+#                                   their config files exist in REPO_ROOT. Off
+#                                   by default: those configs execute code from
+#                                   the tree under review.
 #   DET_FLOOR_TEST_MODE=1         — for unit tests: skip actually invoking lint
 #                                   tools; we still run full TOML/sanitization
 #                                   logic. Used by tests/test-det-floor.sh which
@@ -24,7 +36,9 @@
 #                                   a recorded tool output fixture; the parser
 #                                   reads from it instead of running the tool.
 #                                   <TOOL> is one of RUFF, RUFF_JSON, ESLINT,
-#                                   GOLANGCI, TSC.
+#                                   GOLANGCI, TSC, MYPY, TESTS.
+#   DET_FLOOR_FIXTURE_TESTS_RC    — exit code the shimmed test runner reports
+#                                   (default 1 when a TESTS fixture is set).
 #
 # Exit codes:
 #   0  — wrote a (possibly empty) det-findings.json
@@ -66,23 +80,29 @@ hardfail() {
 }
 
 # ─── NO_DETERMINISTIC short-circuit ─────────────────────────────────────────
-if [[ "${NO_DETERMINISTIC:-0}" == "1" ]]; then
+if [[ "${NO_DETERMINISTIC:-0}" == "1" || "${NO_DETERMINISTIC:-0}" == "true" ]]; then
   printf '[]' > "$DET_OUT"
-  note "NO_DETERMINISTIC=1 set; writing empty det-findings.json and exiting."
+  note "NO_DETERMINISTIC set; writing empty det-findings.json and exiting."
   exit 0
 fi
 
 # ─── Locate config TOML ─────────────────────────────────────────────────────
+# DET_TRUSTED_ROOT wins when set: the config decides which executables run,
+# so it must come from the reviewer's own checkout, not the tree under review.
 if [[ -z "$TOML_PATH" ]]; then
-  if [[ -f "$REPO_ROOT/.codex-pr-review.toml" ]]; then
+  if [[ -n "${DET_TRUSTED_ROOT:-}" ]]; then
+    if [[ -f "$DET_TRUSTED_ROOT/.codex-pr-review.toml" ]]; then
+      TOML_PATH="$DET_TRUSTED_ROOT/.codex-pr-review.toml"
+    fi
+  elif [[ -f "$REPO_ROOT/.codex-pr-review.toml" ]]; then
     TOML_PATH="$REPO_ROOT/.codex-pr-review.toml"
   fi
 fi
 
 # ─── Sanitize a tool command string ─────────────────────────────────────────
-# Per IMPLEMENTATION_PLAN §5: only [a-zA-Z0-9 ./_=-] allowed. Hard-fail on any
-# other character so a malicious .codex-pr-review.toml cannot smuggle shell
-# metacharacters into our command invocation.
+# Only [a-zA-Z0-9 ./_=-] allowed. Hard-fail on any other character so a
+# .codex-pr-review.toml cannot smuggle shell metacharacters into our command
+# invocation.
 sanitize_command() {
   local key="$1"
   local cmd="$2"
@@ -245,8 +265,12 @@ sanitize_command "lint" "$TOML_LINT"
 sanitize_command "typecheck" "$TOML_TYPECHECK"
 sanitize_command "tests" "$TOML_TESTS"
 
-# ─── Auto-detect tools if not configured ────────────────────────────────────
-# Only fill in tools that the user did NOT specify. Per IMPLEMENTATION_PLAN P3:
+# ─── Auto-detect tools if not configured (opt-in) ───────────────────────────
+# Only fill in tools that the user did NOT specify, and only when
+# DET_AUTODETECT=1: every one of these tools executes configuration from the
+# tree under review (eslint.config.js is JavaScript; tsc / golangci-lint read
+# their config from the tree), so detection must not run on PR content by
+# default.
 #   ruff check       if pyproject.toml contains [tool.ruff]
 #   eslint           if .eslintrc.* or eslint.config.* exists
 #   golangci-lint    if .golangci.yml or .golangci.yaml exists
@@ -255,18 +279,20 @@ LINT_CMD="$TOML_LINT"
 TYPECHECK_CMD="$TOML_TYPECHECK"
 TESTS_CMD="$TOML_TESTS"
 
-if [[ -z "$LINT_CMD" ]]; then
-  if [[ -f "$REPO_ROOT/pyproject.toml" ]] && grep -q '^\[tool\.ruff\]' "$REPO_ROOT/pyproject.toml" 2>/dev/null; then
-    LINT_CMD="ruff check"
-  elif compgen -G "$REPO_ROOT/.eslintrc.*" >/dev/null 2>&1 || compgen -G "$REPO_ROOT/eslint.config.*" >/dev/null 2>&1; then
-    LINT_CMD="eslint"
-  elif [[ -f "$REPO_ROOT/.golangci.yml" || -f "$REPO_ROOT/.golangci.yaml" ]]; then
-    LINT_CMD="golangci-lint run"
+if [[ "${DET_AUTODETECT:-0}" == "1" ]]; then
+  if [[ -z "$LINT_CMD" ]]; then
+    if [[ -f "$REPO_ROOT/pyproject.toml" ]] && grep -q '^\[tool\.ruff\]' "$REPO_ROOT/pyproject.toml" 2>/dev/null; then
+      LINT_CMD="ruff check"
+    elif compgen -G "$REPO_ROOT/.eslintrc.*" >/dev/null 2>&1 || compgen -G "$REPO_ROOT/eslint.config.*" >/dev/null 2>&1; then
+      LINT_CMD="eslint"
+    elif [[ -f "$REPO_ROOT/.golangci.yml" || -f "$REPO_ROOT/.golangci.yaml" ]]; then
+      LINT_CMD="golangci-lint run"
+    fi
   fi
-fi
-if [[ -z "$TYPECHECK_CMD" ]]; then
-  if [[ -f "$REPO_ROOT/tsconfig.json" ]]; then
-    TYPECHECK_CMD="tsc --noEmit"
+  if [[ -z "$TYPECHECK_CMD" ]]; then
+    if [[ -f "$REPO_ROOT/tsconfig.json" ]]; then
+      TYPECHECK_CMD="tsc --noEmit"
+    fi
   fi
 fi
 
@@ -356,7 +382,8 @@ RAW_FINDINGS="$WORK_DIR/det-raw-findings.ndjson"
 : > "$RAW_FINDINGS"
 
 emit_finding() {
-  local tool="$1"
+  local tool="$1"   # call-site label only; the tool name is already in title/body
+  : "$tool"
   local path="$2"
   local start_line="$3"
   local end_line="$4"
@@ -399,7 +426,7 @@ emit_finding() {
 # we read the fixture rather than invoking the binary. The shim is intentional
 # — tests do NOT install ruff/eslint/etc. just to drive the parser.
 det_floor_run_tool() {
-  # $1 = tool key (RUFF|RUFF_JSON|ESLINT|GOLANGCI|TSC)
+  # $1 = tool key (RUFF|RUFF_JSON|ESLINT|GOLANGCI|TSC|MYPY|TESTS)
   # $2 = output capture file
   # $3.. = command + args
   local tool_key="$1"; shift
@@ -408,6 +435,11 @@ det_floor_run_tool() {
   if [[ "${DET_FLOOR_TEST_MODE:-0}" == "1" ]]; then
     if [[ -n "${!fix_var:-}" && -f "${!fix_var}" ]]; then
       cp "${!fix_var}" "$out_file"
+      if [[ "$tool_key" == "TESTS" ]]; then
+        # The generic test runner keys off the exit code, so the shim needs
+        # one too.
+        return "${DET_FLOOR_FIXTURE_TESTS_RC:-1}"
+      fi
       return 0
     fi
     # In test mode without a fixture, treat as "tool not found".
@@ -424,6 +456,36 @@ det_floor_run_tool() {
   local rc=0
   ( cd "$REPO_ROOT" && "$@" ) > "$out_file" 2>>"$DET_STDERR" || rc=$?
   return "$rc"
+}
+
+# Run the test command with stdout AND stderr captured together (test runners
+# put the failure summary on either stream).
+det_floor_run_tests() {
+  local out_file="$1"; shift
+  if [[ "${DET_FLOOR_TEST_MODE:-0}" == "1" ]]; then
+    det_floor_run_tool "TESTS" "$out_file" "$@"
+    return $?
+  fi
+  local exe="$1"
+  if ! command -v "$exe" &>/dev/null; then
+    return 127
+  fi
+  local rc=0
+  ( cd "$REPO_ROOT" && "$@" ) > "$out_file" 2>&1 || rc=$?
+  return "$rc"
+}
+
+# First (path, line) of the first changed range — the anchor location for a
+# whole-run finding such as a test failure, which has no line of its own.
+first_changed_location() {
+  [[ -s "$RANGES_FILE" ]] || return 1
+  head -n 1 "$RANGES_FILE" | awk -F'\t' '{ printf "%s\t%s\n", $1, $2 }'
+}
+
+# Unique file paths touched by the diff (for test_files_only).
+changed_files() {
+  [[ -s "$RANGES_FILE" ]] || return 0
+  awk -F'\t' '{ print $1 }' "$RANGES_FILE" | awk '!seen[$0]++'
 }
 
 # ─── Parsers ────────────────────────────────────────────────────────────────
@@ -531,14 +593,87 @@ parse_tsc_text() {
   done < "$out"
 }
 
+parse_mypy_text() {
+  local out="$1"
+  # Formats:  path:line: error: msg [code]
+  #           path:line:col: error: msg [code]
+  #           (also `note:` lines, which are skipped)
+  local re='^([^:]+):([0-9]+)(:[0-9]+)?: (error|warning): (.+)$'
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$line" =~ $re ]]; then
+      local file="${BASH_REMATCH[1]}"
+      local lno="${BASH_REMATCH[2]}"
+      local sev="${BASH_REMATCH[4]}"
+      local msg="${BASH_REMATCH[5]}"
+      local priority=2 category="correctness"
+      if [[ "$sev" == "warning" ]]; then priority=1; category="style"; fi
+      emit_finding "mypy" "$file" "$lno" "$lno" "$priority" "$category" \
+        "mypy: $msg" "mypy reported at \`$file:$lno\`: $msg"
+    fi
+  done < "$out"
+}
+
+# ─── Generic test runner ────────────────────────────────────────────────────
+# `tests` has no per-line parser: any non-zero exit is one priority-3
+# (blocking) finding anchored on the diff's first changed line, with the last
+# 30 lines of runner output as the body. Exit 127 (runner not installed) is a
+# skip, not a failure.
+run_tests_cmd() {
+  local cmd="$1"
+  local argv=()
+  read -r -a argv <<<"$cmd"
+  local exe="${argv[0]:-}"
+  [[ -z "$exe" ]] && return 0
+
+  if [[ "$TOML_TEST_FILES_ONLY" == "true" ]]; then
+    local f
+    while IFS= read -r f; do
+      [[ -n "$f" ]] && argv+=("$f")
+    done < <(changed_files)
+  fi
+
+  local out_file="$WORK_DIR/det-tests-output.txt"
+  local rc=0
+  det_floor_run_tests "$out_file" "${argv[@]}" || rc=$?
+  if [[ "$rc" == "127" ]]; then
+    note "tests runner '$exe' not found on PATH; skipping"
+    return 0
+  fi
+  if [[ "$rc" == "0" ]]; then
+    note "tests passed ($cmd)"
+    return 0
+  fi
+
+  local anchor path lno
+  anchor=$(first_changed_location || true)
+  if [[ -z "$anchor" ]]; then
+    note "tests failed (rc=$rc) but the diff has no changed lines to anchor the finding on; skipping"
+    return 0
+  fi
+  IFS=$'\t' read -r path lno <<< "$anchor"
+  local tail_out
+  tail_out=$(tail -n 30 "$out_file" 2>/dev/null || true)
+  local body
+  body="Test command \`$cmd\` exited with status $rc. Last lines of output:"$'\n\n```\n'"$tail_out"$'\n```'
+  emit_finding "tests" "$path" "$lno" "$lno" 3 "correctness" \
+    "tests: \`$exe\` failed (exit $rc)" "$body"
+}
+
 # ─── Tool dispatch ──────────────────────────────────────────────────────────
 # We choose the parser by the first token of the configured/detected command.
-# Unknown tools are skipped silently with a stderr note (the floor is best-
-# effort: missing parser support should not block a review).
+# Unknown lint/typecheck tools are skipped with a stderr note (the floor is
+# best-effort: missing parser support should not block a review). The `tests`
+# tag takes the generic exit-code runner regardless of executable.
 run_tool() {
   local tag="$1"   # lint | typecheck | tests
   local cmd="$2"
   [[ -z "$cmd" ]] && return 0
+
+  if [[ "$tag" == "tests" ]]; then
+    run_tests_cmd "$cmd"
+    return 0
+  fi
 
   # Split into argv.
   local argv=()
@@ -549,6 +684,21 @@ run_tool() {
   local out_file="$WORK_DIR/det-${tag}-output.txt"
   local rc=0
   case "$exe" in
+    mypy)
+      # mypy text output: path:line: error: msg. Keep the user's flags; add
+      # --no-color-output / --no-error-summary so the parser sees plain lines.
+      local margv=("${argv[@]}" --no-color-output --no-error-summary)
+      det_floor_run_tool "MYPY" "$out_file" "${margv[@]}" || rc=$?
+      if [[ "$rc" == "127" ]]; then
+        note "$tag tool 'mypy' not found on PATH; skipping"
+        return 0
+      fi
+      if [[ -s "$out_file" ]]; then
+        parse_mypy_text "$out_file"
+      else
+        note "$tag tool 'mypy' produced no output (rc=$rc); nothing to report"
+      fi
+      ;;
     ruff)
       # Prefer JSON output if available.
       local json_argv=("${argv[@]}" --output-format json)
@@ -615,7 +765,7 @@ run_tool() {
       fi
       ;;
     *)
-      note "$tag tool '$exe' has no built-in parser; skipping (configure ruff/eslint/golangci-lint/tsc for native support)"
+      note "$tag tool '$exe' has no built-in parser; skipping (configure ruff/eslint/golangci-lint/tsc/mypy for native support)"
       return 0
       ;;
   esac

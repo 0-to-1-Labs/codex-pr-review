@@ -1,7 +1,8 @@
-# tree-sitter native bindings — installed by install.sh --version 2 into the
-# skill directory, not vendored in the repo.
-scripts/node_modules/
-scripts/package-lock.json
+# tree-sitter native bindings — installed by install.sh or the SessionStart
+# hook (scripts/ensure-tree-sitter.sh), not vendored in the repo. The
+# lockfile IS committed so `npm ci` gives a reproducible install.
+scripts/node_modules
+scripts/npm-install.log
 
 # OS / editor noise
 .DS_Store

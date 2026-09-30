@@ -12,12 +12,15 @@ the native tree-sitter bindings installed via `scripts/package.json`:
 - `tree-sitter-typescript` (^0.23.0)
 - `tree-sitter-go` (^0.23.0)
 
-`install.sh --version 2` runs `npm install` against `scripts/package.json` to
-provision these. The native path is more portable than `npx tree-sitter` (no
-network call at runtime, no global install required) and roughly 56 MB of
-node_modules is acceptable for a developer-tooling skill.
+`scripts/ensure-tree-sitter.sh` provisions these with `npm ci` from the
+committed `scripts/package-lock.json`. The plugin's `SessionStart` hook runs it
+on first use (installing into `${CLAUDE_PLUGIN_DATA}` and linking
+`scripts/node_modules` to it); `install.sh` runs it for standalone installs.
+The native path is more portable than `npx tree-sitter` (no network call at
+runtime, no global install required) and roughly 56 MB of node_modules is
+acceptable for a developer-tooling skill.
 
-If `npm install` fails or the native binaries cannot load on a given machine,
+If the install fails or the native binaries cannot load on a given machine,
 `plan.js` emits a stderr warning and falls back to the AWK hunk chunker. Reviews
 remain functional; only the AST-aware boundary snapping is lost.
 

@@ -221,14 +221,25 @@ const CODE_EXTS = new Set([
 
 // ─── Tree-sitter loading (graceful fallback) ────────────────────────────────
 function loadTreeSitter() {
+  // Search order: the normal resolver, scripts/node_modules (install.sh or
+  // the SessionStart hook's fallback), then the plugin data directory the
+  // SessionStart hook installs into for marketplace installs
+  // (${CLAUDE_PLUGIN_DATA}/node_modules survives plugin updates), then an
+  // explicit override.
+  const roots = [
+    path.join(__dirname, 'node_modules'),
+    process.env.CLAUDE_PLUGIN_DATA ? path.join(process.env.CLAUDE_PLUGIN_DATA, 'node_modules') : null,
+    process.env.CODEX_PR_REVIEW_NODE_MODULES || null,
+  ].filter(Boolean);
   function tryRequire(modName) {
     try {
       return require(modName);
     } catch (_) {}
-    try {
-      const local = path.join(__dirname, 'node_modules', modName);
-      return require(local);
-    } catch (_) {}
+    for (const root of roots) {
+      try {
+        return require(path.join(root, modName));
+      } catch (_) {}
+    }
     return null;
   }
 
@@ -724,7 +735,12 @@ function main() {
   if (mode === 'ast' || (mode === 'auto' && hasSupportedLang)) {
     ts = loadTreeSitter();
     if (!ts) {
-      if (mode === 'ast') warn('--chunker ast requested but tree-sitter not loadable; falling back to hunk');
+      // Say so in auto mode too: a marketplace install has no node_modules
+      // until the SessionStart hook (or a manual `npm ci`) provisions it, and
+      // a silent fallback hides that the AST chunker is off.
+      warn((mode === 'ast' ? '--chunker ast requested but ' : 'PR contains Python/TypeScript/Go but ') +
+           'tree-sitter is not loadable; falling back to hunk chunking. ' +
+           `Install with: cd "${__dirname}" && npm ci`);
       mode = 'hunk';
     } else {
       mode = 'ast';
