@@ -15,11 +15,12 @@ while [[ $# -gt 0 ]]; do
             cat <<EOF
 Usage: install.sh
 
+  Standalone install (no plugin marketplace) into ~/.claude/skills/.
   Installs the dual-family Codex + Claude pipeline: cross-family verifier,
   deterministic floor, AST-aware chunker, iteration modes, location validator.
-  Requires node>=18 and the claude CLI. Copies plan.js, ast-chunk.sh, grammars/,
-  location-validator.sh, det-floor.sh, claude-* prompts, verifier-* prompts,
-  and .codex-pr-review.toml.example.
+  Requires node>=20 and Claude Code >= 2.1.259. Copies plan.js, ast-chunk.sh,
+  grammars/, location-validator.sh, det-floor.sh, claude-* prompts, verifier-*
+  prompts, and .codex-pr-review.toml.example.
 EOF
             exit 0
             ;;
@@ -72,11 +73,16 @@ trap cleanup_stage EXIT
 # Start from a clean staging directory.
 rm -rf "$STAGE_DIR"
 
-# Copy skill files into the staging directory.
+# Copy skill files into the staging directory. The skill definition lives in
+# skills/codex-pr-review/SKILL.md (the plugin-system location); a standalone
+# install has no ${CLAUDE_PLUGIN_ROOT}, so rewrite that variable to the
+# install path in the staged copy.
 echo "Staging skill files for $SKILL_DIR..."
 mkdir -p "$STAGE_DIR/scripts"
-cp "$SCRIPT_DIR/SKILL.md" "$STAGE_DIR/"
+SKILL_DIR_VAL="$SKILL_DIR" perl -pe 's/\Q${CLAUDE_PLUGIN_ROOT}\E/$ENV{SKILL_DIR_VAL}/g' \
+    "$SCRIPT_DIR/skills/codex-pr-review/SKILL.md" > "$STAGE_DIR/SKILL.md"
 cp "$SCRIPT_DIR/scripts/review.sh" "$STAGE_DIR/scripts/"
+cp "$SCRIPT_DIR/scripts/ensure-tree-sitter.sh" "$STAGE_DIR/scripts/"
 cp "$SCRIPT_DIR/scripts/codex-prompt.md" "$STAGE_DIR/scripts/"
 cp "$SCRIPT_DIR/scripts/codex-output-schema.json" "$STAGE_DIR/scripts/"
 cp "$SCRIPT_DIR/scripts/chunk-diff.awk" "$STAGE_DIR/scripts/"
@@ -99,6 +105,9 @@ cp "$SCRIPT_DIR/scripts/verifier-output-schema.json" "$STAGE_DIR/scripts/"
 if [ -f "$SCRIPT_DIR/scripts/package.json" ]; then
     cp "$SCRIPT_DIR/scripts/package.json" "$STAGE_DIR/scripts/"
 fi
+if [ -f "$SCRIPT_DIR/scripts/package-lock.json" ]; then
+    cp "$SCRIPT_DIR/scripts/package-lock.json" "$STAGE_DIR/scripts/"
+fi
 if [ -d "$SCRIPT_DIR/scripts/grammars" ]; then
     cp -R "$SCRIPT_DIR/scripts/grammars" "$STAGE_DIR/scripts/"
 fi
@@ -108,6 +117,7 @@ fi
 
 # Make scripts executable in the staging directory.
 chmod +x "$STAGE_DIR/scripts/review.sh"
+chmod +x "$STAGE_DIR/scripts/ensure-tree-sitter.sh" 2>/dev/null || true
 chmod +x "$STAGE_DIR/scripts/ast-chunk.sh" 2>/dev/null || true
 chmod +x "$STAGE_DIR/scripts/det-floor.sh" 2>/dev/null || true
 chmod +x "$STAGE_DIR/scripts/location-validator.sh" 2>/dev/null || true
@@ -167,9 +177,9 @@ if command -v node &>/dev/null; then
     # explicitly — mirroring scripts/review.sh's defensive check.
     NODE_MAJOR=$(node --version 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/')
     if [[ -z "$NODE_MAJOR" || ! "$NODE_MAJOR" =~ ^[0-9]+$ ]]; then
-        echo "  Warning: could not parse node version ($(node --version 2>/dev/null || echo 'unknown')); treating as below v18. plan.js may not work."
-    elif [ "$NODE_MAJOR" -lt 18 ]; then
-        echo "  Warning: node $(node --version) is below the recommended v18. plan.js may not work."
+        echo "  Warning: could not parse node version ($(node --version 2>/dev/null || echo 'unknown')); treating as below v20. plan.js may not work."
+    elif [ "$NODE_MAJOR" -lt 20 ]; then
+        echo "  Warning: node $(node --version) is below the required v20. plan.js may not work."
     else
         echo "  node $(node --version) OK."
     fi
@@ -177,39 +187,34 @@ else
     echo "  Warning: node not found. plan.js (AST chunker) will fall back to AWK."
 fi
 if command -v claude &>/dev/null; then
-    echo "  claude CLI present."
+    echo "  claude CLI present ($(claude --version 2>/dev/null | head -1)). Minimum for this plugin: 2.1.259."
 else
     echo "  Warning: claude CLI not found. The dual-family review will not work."
-    echo "    Install: https://docs.anthropic.com/en/docs/claude-code"
+    echo "    Install: https://code.claude.com/docs/en/overview"
 fi
 
 # If node is present and we have a package.json, install dependencies into
-# the skill directory so plan.js can require tree-sitter at runtime.
+# the skill directory so plan.js can require tree-sitter at runtime. Same
+# script the plugin's SessionStart hook runs (fails open with a reason).
 if command -v node &>/dev/null && [ -f "$SKILL_DIR/scripts/package.json" ]; then
-    NPM_LOG="$SKILL_DIR/scripts/npm-install.log"
     echo "  Installing tree-sitter native bindings (this may take a minute)..."
-    if (cd "$SKILL_DIR/scripts" && npm install --no-audit --no-fund --legacy-peer-deps) >"$NPM_LOG" 2>&1; then
-        echo "  tree-sitter installed."
-    else
-        echo "  Warning: npm install failed. plan.js will fall back to AWK chunker."
-        echo "    See log for details: $NPM_LOG"
-    fi
+    CLAUDE_PLUGIN_ROOT="$SKILL_DIR" bash "$SKILL_DIR/scripts/ensure-tree-sitter.sh"
 fi
 
-# Check codex OAuth
+# Check codex authentication
 echo
 echo "Checking Codex authentication..."
 if command -v codex &>/dev/null; then
     if codex login status &>/dev/null 2>&1; then
-        echo "  Codex OAuth is configured."
+        echo "  Codex is authenticated."
     else
         echo
         echo "=========================================="
-        echo "Codex OAuth not configured"
+        echo "Codex not authenticated"
         echo "=========================================="
         echo
-        echo "codex exec (headless mode) requires OAuth, not an API key."
-        echo "Run: codex login"
+        echo "Run: codex login                    (ChatGPT account)"
+        echo "or:  codex login --with-api-key     (reads OPENAI_API_KEY from stdin)"
         echo
     fi
 fi

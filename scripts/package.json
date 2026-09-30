@@ -1,9 +1,9 @@
 {
   "name": "codex-pr-review-scripts",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Node helpers for codex-pr-review (P1: AST chunker via tree-sitter).",
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=20" },
   "dependencies": {
     "tree-sitter": "^0.21.0",
     "tree-sitter-python": "^0.21.0",
