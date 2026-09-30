@@ -250,6 +250,81 @@ assert "jq -e 'all(.priority == 2)' \"$w_tsc/det-findings.json\" >/dev/null" \
 assert "jq -e 'all(.category == \"correctness\")' \"$w_tsc/det-findings.json\" >/dev/null" \
   "[tsc] all findings category=correctness"
 
+# 7f. mypy text parser. Diff touches src/example.py:10 and :25 (line 42 is
+# filtered) and src/handler.ts:15 (a mypy warning → priority 1). The `note:`
+# line must be ignored.
+echo "Test 7f: mypy text parser (5 lines → 3 findings after changed-line filter)"
+run_tool_test_env "mypy" \
+  $'[deterministic]\ntypecheck = "mypy --strict"\n' \
+  "DET_FLOOR_FIXTURE_MYPY" \
+  "$FIX/mypy-output.txt" \
+  3
+w_mypy="$WORK/t7-mypy"
+assert "jq -e '[.[] | select(.code_location.path == \"src/example.py\") | .code_location.start_line] | sort == [10, 25]' \"$w_mypy/det-findings.json\" >/dev/null" \
+  "[mypy] example.py lines 10 and 25 survive (42 filtered)"
+assert "jq -e '[.[] | select(.code_location.path == \"src/example.py\")] | all(.priority == 2 and .category == \"correctness\")' \"$w_mypy/det-findings.json\" >/dev/null" \
+  "[mypy] errors are priority 2 / correctness"
+assert "jq -e '.[] | select(.code_location.path == \"src/handler.ts\") | .priority == 1' \"$w_mypy/det-findings.json\" >/dev/null" \
+  "[mypy] warning is priority 1"
+
+# 7g. Generic tests runner: a non-zero exit produces exactly one priority-3
+# finding anchored on the diff's first changed line, with the tail of the
+# runner output in the body.
+echo "Test 7g: tests runner (exit 1 → one P3 finding on the first changed line)"
+w_t="$WORK/t7-tests"; mkdir -p "$w_t"
+r_t="$WORK/t7-tests-repo"; mkdir -p "$r_t"
+printf '[deterministic]\ntests = "pytest -x --tb=short"\n' > "$r_t/.codex-pr-review.toml"
+env DET_FLOOR_TEST_MODE=1 \
+  DET_FLOOR_FIXTURE_TESTS="$FIX/pytest-output.txt" DET_FLOOR_FIXTURE_TESTS_RC=1 \
+  bash "$DET" "$w_t" "$r_t" "$diff_file" > "$w_t/stdout.log" 2> "$w_t/stderr.log"
+assert "jq -e 'length == 1' \"$w_t/det-findings.json\" >/dev/null" "[tests] exactly one finding"
+assert "jq -e '.[0].priority == 3 and .[0].category == \"correctness\" and .[0].source == \"deterministic\"' \"$w_t/det-findings.json\" >/dev/null" \
+  "[tests] finding is priority 3 / correctness / deterministic"
+assert "jq -e '.[0].code_location.path == \"src/example.py\" and .[0].code_location.start_line == 10' \"$w_t/det-findings.json\" >/dev/null" \
+  "[tests] anchored on the diff's first changed line (src/example.py:10)"
+assert "jq -e '.[0].body | contains(\"FAILED tests/test_example.py::test_three\")' \"$w_t/det-findings.json\" >/dev/null" \
+  "[tests] body carries the runner output tail"
+assert "jq -e '.[0].title | contains(\"pytest\")' \"$w_t/det-findings.json\" >/dev/null" \
+  "[tests] title names the runner"
+
+# 7h. Tests runner: exit 0 → no finding.
+echo "Test 7h: tests runner (exit 0 → no finding)"
+w_t0="$WORK/t7-tests-pass"; mkdir -p "$w_t0"
+env DET_FLOOR_TEST_MODE=1 \
+  DET_FLOOR_FIXTURE_TESTS="$FIX/pytest-output.txt" DET_FLOOR_FIXTURE_TESTS_RC=0 \
+  bash "$DET" "$w_t0" "$r_t" "$diff_file" > "$w_t0/stdout.log" 2> "$w_t0/stderr.log"
+assert "jq -e '. == []' \"$w_t0/det-findings.json\" >/dev/null" "[tests-pass] no findings"
+assert "grep -q 'tests passed' \"$w_t0/stderr.log\"" "[tests-pass] stderr notes the pass"
+
+# 7i. Trusted TOML root: the config in DET_TRUSTED_ROOT wins, and a TOML in
+# REPO_ROOT (the PR tree) is ignored even when the trusted root has none.
+echo "Test 7i: DET_TRUSTED_ROOT is the only TOML source"
+w_tr="$WORK/t7-trusted"; mkdir -p "$w_tr"
+pr_tree="$WORK/t7-pr-tree"; mkdir -p "$pr_tree"
+trusted="$WORK/t7-trusted-root"; mkdir -p "$trusted"
+printf '[deterministic]\ntests = "pytest"\n' > "$pr_tree/.codex-pr-review.toml"
+env DET_FLOOR_TEST_MODE=1 DET_TRUSTED_ROOT="$trusted" \
+  DET_FLOOR_FIXTURE_TESTS="$FIX/pytest-output.txt" DET_FLOOR_FIXTURE_TESTS_RC=1 \
+  bash "$DET" "$w_tr" "$pr_tree" "$diff_file" > "$w_tr/stdout.log" 2> "$w_tr/stderr.log"
+assert "jq -e '. == []' \"$w_tr/det-findings.json\" >/dev/null" \
+  "[trusted-root] PR-tree TOML ignored when DET_TRUSTED_ROOT is set"
+assert "grep -q 'no deterministic floor configured' \"$w_tr/stderr.log\"" \
+  "[trusted-root] floor reports no config"
+
+# 7j. Auto-detection is opt-in: a tsconfig.json in the tree does nothing
+# without DET_AUTODETECT=1, and selects tsc with it.
+echo "Test 7j: lint/typecheck auto-detection is opt-in"
+auto_tree="$WORK/t7-auto-tree"; mkdir -p "$auto_tree"
+printf '{}' > "$auto_tree/tsconfig.json"
+w_a0="$WORK/t7-auto-off"; mkdir -p "$w_a0"
+env DET_FLOOR_TEST_MODE=1 DET_FLOOR_FIXTURE_TSC="$FIX/tsc-output.txt" \
+  bash "$DET" "$w_a0" "$auto_tree" "$diff_file" > "$w_a0/stdout.log" 2> "$w_a0/stderr.log"
+assert "jq -e '. == []' \"$w_a0/det-findings.json\" >/dev/null" "[autodetect-off] tsconfig.json alone runs nothing"
+w_a1="$WORK/t7-auto-on"; mkdir -p "$w_a1"
+env DET_FLOOR_TEST_MODE=1 DET_AUTODETECT=1 DET_FLOOR_FIXTURE_TSC="$FIX/tsc-output.txt" \
+  bash "$DET" "$w_a1" "$auto_tree" "$diff_file" > "$w_a1/stdout.log" 2> "$w_a1/stderr.log"
+assert "jq -e 'length == 2' \"$w_a1/det-findings.json\" >/dev/null" "[autodetect-on] tsc selected from tsconfig.json"
+
 # ─── 8. Changed-line filter: stronger assertion ─────────────────────────────
 # Use a diff that only touches line 25 (omitting line 10) and re-run ruff JSON.
 echo "Test 8: changed-line filter (only line 25 in diff → 1 finding survives)"

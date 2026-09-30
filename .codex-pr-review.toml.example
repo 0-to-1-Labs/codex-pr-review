@@ -1,27 +1,37 @@
 # .codex-pr-review.toml — project-level configuration for the codex-pr-review skill.
 #
-# This file is OPTIONAL. v2 P3 reads the [deterministic] section to wire up
-# the lint / typecheck / test floor. Drop this file at your repo root as
+# This file is OPTIONAL. det-floor.sh reads the [deterministic] section to wire
+# up the lint / typecheck / test floor. Drop this file at your repo root as
 # `.codex-pr-review.toml` (no `.example`) to enable.
 #
+# It is read from YOUR local checkout, never from the PR being reviewed: the
+# `tests` command runs any executable, so the PR must not be able to set it.
+# The commands themselves run inside a temporary worktree at the PR head, so
+# lint/typecheck configuration files (eslint.config.js, tsconfig.json, ...)
+# come from the PR.
+#
 # Allowed keys under [deterministic] (anything else is a hard fail):
-#   lint            — command for the project linter (e.g. ruff/eslint/golangci-lint)
-#   typecheck       — command for the project typechecker (e.g. tsc/mypy)
-#   tests           — command for the project test runner (e.g. pytest)
-#   test_files_only — boolean; when true, the runner appends the diff's file
-#                     paths to the test command (per-file mode). Skipped if the
-#                     test runner doesn't support per-file args.
+#   lint            — linter with a built-in parser: ruff, eslint, golangci-lint
+#   typecheck       — typechecker with a built-in parser: tsc, mypy
+#   tests           — any test command. Non-zero exit → one priority-3
+#                     (blocking) finding anchored on the diff's first changed
+#                     line, with the last 30 lines of output as the body.
+#   test_files_only — boolean; when true, the diff's file paths are appended
+#                     to the test command (per-file mode). Use only with a
+#                     runner that accepts file arguments (pytest, jest, ...).
 #
 # Command strings are sanitized: only [a-zA-Z0-9 ./_=-] characters are allowed.
 # Anything outside that set (`;`, `&`, `|`, `$`, …) hard-fails with an unsafe-
 # command error before the tool is invoked.
 #
-# Auto-detection (no toml): det-floor.sh falls back to `ruff check` if
-# pyproject.toml has [tool.ruff], `eslint` if `.eslintrc.*` exists, `golangci-
-# lint run` if `.golangci.yml` exists, `tsc --noEmit` if `tsconfig.json` exists.
+# Auto-detection is opt-in (`--deterministic-autodetect`): then, for keys you
+# leave unset, det-floor.sh runs `ruff check` if pyproject.toml has
+# [tool.ruff], `eslint` if `.eslintrc.*`/`eslint.config.*` exists, `golangci-
+# lint run` if `.golangci.yml` exists, `tsc --noEmit` if `tsconfig.json`
+# exists. Off by default because those configs execute code from the PR.
 
 [deterministic]
-# Each command is run with cwd at the repo root. Output is parsed for
+# Each command is run with cwd at the PR-head worktree. Output is parsed for
 # (file, line, message) tuples and converted into [deterministic] findings,
 # scoped to lines touched by the PR diff.
 lint = "ruff check"

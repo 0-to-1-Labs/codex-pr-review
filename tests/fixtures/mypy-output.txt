@@ -1,0 +1,5 @@
+src/example.py:10: error: Module "os" has no attribute "pathx"  [attr-defined]
+src/example.py:25:5: error: Incompatible types in assignment (expression has type "str", variable has type "int")  [assignment]
+src/example.py:42: error: Name "undefined_thing" is not defined  [name-defined]
+src/example.py:25: note: See https://mypy.readthedocs.io/en/stable/
+src/handler.ts:15: warning: unused "type: ignore" comment
