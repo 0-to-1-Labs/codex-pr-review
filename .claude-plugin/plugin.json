@@ -1,8 +1,10 @@
 {
   "name": "codex-pr-review",
-  "description": "Review a pull request using a dual-family pipeline (OpenAI Codex + Claude Opus) with a cross-family grounded verifier and a deterministic lint/typecheck/test floor.",
-  "version": "2.0.1",
+  "description": "Review a pull request using a dual-family pipeline (OpenAI Codex + Claude) with a cross-family grounded verifier and a deterministic lint/typecheck/test floor.",
+  "version": "2.1.0",
   "author": {
     "name": "John P. Sasser"
-  }
+  },
+  "repository": "https://github.com/0-to-1-Labs/codex-pr-review",
+  "license": "MIT"
 }

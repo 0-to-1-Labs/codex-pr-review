@@ -1,19 +1,120 @@
 # Changelog
 
-## [Unreleased]
+## v2.1.0 — 2026-09-30
 
-Post-2.0.0 correctness fixes to the verifier, confidence threading, and the
-installer/docs.
+Security audit release. Every `claude -p` subprocess is now sandboxed, the
+whole pipeline runs against a worktree at the PR head, the promised `tests`
+and `mypy` floors exist, marketplace installs get the AST chunker, and the
+models track the current generation. Also folds in the post-2.0.0 fixes
+that shipped as 2.0.1 (listed under "2.0.1 fixes" below).
+
+### Security
+
+- **`claude -p` runs in restricted mode.** Every Claude call passes
+  `--restricted --tools Read,Grep --disallowedTools "mcp__*"
+  --strict-mcp-config --disable-slash-commands --permission-prompts none
+  --no-session-persistence --max-budget-usd`. The reviewed repository's
+  `.claude/settings.json` hooks, `.mcp.json` servers, and slash commands no
+  longer run, and only Read/Grep exist in the model's tool set
+  (`--allowedTools` only pre-approved; it did not restrict, and the default
+  tool set omits Grep). Claude Code **2.1.259** is now the minimum; the
+  script checks the version and exits 1 with an upgrade message.
+- **PR-head worktree.** The PR head is checked out into a temporary
+  `git worktree` (removed on exit) and the planner, deterministic floor, both
+  reviewers, and both verifiers use it as their working directory. Reviews
+  no longer depend on what is checked out locally.
+- **Deterministic floor is no longer PR-controlled.** Lint/typecheck
+  auto-detection is opt-in (`--deterministic-autodetect`) because
+  `eslint.config.js`, `tsconfig.json`, and friends execute code from the PR.
+  Cross-repository (fork) PRs skip the floor unless `--deterministic` is
+  passed. `.codex-pr-review.toml` is read from the local checkout only.
+- **Prior-review sentinel validated.** Only comments by the authenticated
+  `gh` user (or, failing that, not by the PR author) are trusted;
+  `sha`/`prior_sha` must match `^[0-9a-f]{7,40}$`, `iteration`/`findings`
+  must be integers. Previously any commenter could set the iteration counter,
+  inject "prior findings" into every prompt, and pass a git option such as
+  `--output=<path>` as the revision.
+- **Posted comment escaping.** `<!--` / `-->` in model-derived text are
+  escaped in the rendered comment, and `-->` inside the embedded JSON block
+  becomes `-->`, so a finding body cannot close the HTML comments that
+  carry the sentinel and review data.
+- **Untrusted-content rule in every prompt.** Reviewers and verifiers are told
+  the diff, file contents, manifest, and rules are data, not instructions,
+  and never to quote files outside the diff.
+- **Private diagnostics.** Failure copies and `--dry-run` output go to
+  `mktemp` paths created under `umask 077` instead of fixed world-readable
+  `/tmp` names.
+
+### Added
+
+- **`tests` floor and `mypy` parser.** `tests = "<cmd>"` now runs: a non-zero
+  exit posts one `[deterministic] [P3]` finding anchored on the diff's first
+  changed line with the last 30 lines of output (so the `blocking` verdict
+  rule for test failures can fire). `typecheck = "mypy ..."` output is
+  parsed (`path:line: error: msg`). `test_files_only` is honored.
+- **`SessionStart` hook installs tree-sitter.** `hooks/hooks.json` runs
+  `scripts/ensure-tree-sitter.sh` (`npm ci` from the committed
+  `scripts/package-lock.json` into `${CLAUDE_PLUGIN_DATA}`, linked from
+  `scripts/node_modules`). Fast when already installed, fails open with a
+  logged reason, never blocks the session. Marketplace installs previously
+  never had the AST chunker, silently.
+- **`category` on every finding** (`correctness` / `security` / `performance`
+  / `maintainability` / `style`) in the output schema and prompts, so the
+  location validator's documented maintainability exception is reachable.
+- **Cost bounds.** `--max-budget-usd` (default 2.00) per `claude -p` call and
+  `--max-verify-findings` (default 40) cap on the verifier fan-out.
+- **Flags:** `--deterministic`, `--deterministic-autodetect`,
+  `--max-budget-usd`, `--max-verify-findings`; env `CODEX_MODEL`.
+- **CI** runs on Node 22, installs with `npm ci`, and asserts the AST chunker
+  actually engages (`chunker_mode == "ast"`), plus `bash -n` / `node --check`
+  / shellcheck.
 
 ### Changed
 
-- **Default models bumped to the current generation.** The Codex reviewer now
-  defaults to `gpt-5.6-sol` (was `gpt-5.3-codex`), and the Claude reviewer,
-  verifier, and escalation verifier now default to `claude-opus-4-8` (was
-  `claude-opus-4-7`). All remain overridable via `--model-codex`,
-  `--model-claude`, and `--model-verifier`.
+- **Models.** Claude reviewer and verifier default to the floating `opus`
+  alias, escalation to `fable`, cheap override `haiku`. Codex defaults to
+  `gpt-6.1-sol` (Codex CLI's current default). Escalation is skipped when it
+  names the same model as the primary verifier (it was a 2x-cost same-model
+  retry); Codex-side escalation now passes `model_reasoning_effort=high`.
+- **Synthesis runs on Codex** — the docs now say so; `--model-claude` never
+  affected it.
+- **Missing `claude` CLI** degrades to the raw union (`verifier_verdict:
+  n/a`) instead of a failed verifier subprocess per finding that demoted
+  every Codex finding to `[unconfirmed-by-claude]`.
+- **PR URLs are passed to `gh` verbatim**, so a URL for another repository
+  reviews (and comments on) that repository's PR.
+- **Numeric flags are validated** (`--threshold`, `--chunk-size`,
+  `--max-parallel`, `--max-diff-lines`, `--max-budget-usd`,
+  `--max-verify-findings`) before any model call; a bad value exits 2.
+- **Codex auth wording.** `codex exec` works with a ChatGPT login or
+  `codex login --with-api-key`; the "requires OAuth, not an API key" claim
+  was wrong.
+- **`claude -p` prompt.** A short real prompt replaces the undocumented bare
+  `-`; the prompt file still arrives on stdin and is refused above the
+  documented 10 MB cap.
+- **Verifier file names include the source family** so a `[both]` pair no
+  longer races on the same verdict file.
+- **`plan.js` gets `--head-sha`** on the main path and warns in `auto` mode
+  when tree-sitter is not loadable; the run log reports the real chunker mode.
+- **Root `SKILL.md` removed.** The single copy is
+  `skills/codex-pr-review/SKILL.md` (trimmed to execution guidance;
+  `allowed-tools` narrowed to the review script). `install.sh` copies it
+  from there and rewrites `${CLAUDE_PLUGIN_ROOT}` for standalone installs.
+- **Dependencies.** `scripts/package-lock.json` is committed; `npm ci`
+  replaces `npm install --legacy-peer-deps`; Node floor is 20 (18 is
+  end-of-life).
+- **Repository moved** to `github.com/0-to-1-Labs/codex-pr-review`.
 
-### Fixes
+### 2.0.1 fixes (previously unreleased)
+
+- **Default models bumped to the current generation.** The Codex reviewer
+  defaulted to `gpt-5.6-sol` (was `gpt-5.3-codex`), and the Claude reviewer,
+  verifier, and escalation verifier to `claude-opus-4-8` (was
+  `claude-opus-4-7`). Superseded by the alias defaults above.
+- **Plugin marketplace install** instructions and `${CLAUDE_PLUGIN_ROOT}` in
+  the skill's run command.
+
+#### Fixes
 
 - **Verifier reads files at the PR head SHA, not local HEAD.** The cross-family
   grounded verifier now fetches the file contents at the PR's head commit rather
@@ -31,10 +132,10 @@ installer/docs.
 - **Threshold-vs-penalty double-jeopardy fixed; Opus is the default verifier.**
   The `0.7×` penalty for `[unconfirmed-by-X]` findings is now applied only for
   display, and the threshold filter checks the pre-penalty score (no double
-  penalty). The default `--model-verifier` is now `claude-opus-4-7`
-  (`claude-haiku-4-5` remains a cheaper override).
+  penalty). The default `--model-verifier` moved to the Opus tier
+  (the Haiku tier remains a cheaper override).
 
-### Audit fixes (installer + docs)
+#### Audit fixes (installer + docs)
 
 - **Installer hardening.** `install.sh` now runs under `set -euo pipefail`,
   installs transactionally (stages into a temp dir and atomically swaps into
@@ -46,11 +147,10 @@ installer/docs.
   `review.sh` after deleting its own backup; there is no v1 source in the repo.
   The `--version` flag and all rollback claims have been removed from the
   installer and docs.
-- **Doc corrections.** README's `--model-verifier` default corrected to
-  `claude-opus-4-7`; the "vendored grammars" claim corrected to "tree-sitter
-  bindings installed via npm into `scripts/node_modules/`"; and "silently
-  no-ops" corrected to "no-ops (with a note on stderr)" to match
-  `det-floor.sh`.
+- **Doc corrections.** README's `--model-verifier` default corrected; the
+  "vendored grammars" claim corrected to "tree-sitter bindings installed via
+  npm into `scripts/node_modules/`"; and "silently no-ops" corrected to
+  "no-ops (with a note on stderr)" to match `det-floor.sh`.
 
 ## v2.0.0 — 2026-05-05
 
